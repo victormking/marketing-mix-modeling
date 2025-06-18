@@ -1,0 +1,637 @@
+---
+title: "Marketing Mix Modeling Optimizing Ad Spend for Sales Growth"
+output: html_document
+date: "2025-06-02"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+
+# ---- STEP 1: Setup ----
+
+# Load core libraries
+library(tidyverse)     # dplyr, ggplot2, etc.
+library(janitor)       # Clean column names
+library(skimr)         # Summary statistics
+library(datarium)      # Dataset
+library(broom)         # Tidy regression summaries
+library(car)           # VIF
+library(performance)   # Model diagnostics
+library(reactable)     # Interactive tables
+library(gt)            # Presentation tables
+library(patchwork)     # Combine plots
+library(glmnet)        # LASSO
+library(caret)         # ML workflows
+library(rsample)       # Train/test split
+library(GGally)        # Correlation scatterplot matrix
+
+# Here I Load the marketing dataset
+data("marketing")
+
+# Clean the column names
+marketing <- marketing %>%
+  janitor::clean_names()
+
+# Glimpse and skim
+glimpse(marketing)
+skim_summary <- skimr::skim(marketing)
+
+```
+
+```{r}
+
+# ---- STEP 2: Data Cleaning & EDA ----
+
+# 1. Check for missing values
+colSums(is.na(marketing))
+
+# 2. Skim summary (already stored in Step 1)
+# skim_summary <- skimr::skim(marketing)  # already run
+
+# 3. Summary statistics and zero checks
+summary(marketing)
+
+zero_counts <- marketing %>%
+  summarise(across(everything(), ~sum(. == 0)))
+
+# 4. Boxplot of all variables (p2a)
+p2a <- marketing %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+  ggplot(aes(x = variable, y = value, fill = variable)) +
+  geom_boxplot(show.legend = FALSE) +
+  labs(title = "Boxplots of All Variables", y = "Value") +
+  theme_minimal()
+
+# 5. Pairplot of correlations (p2b)
+p2b <- ggpairs(marketing[, 1:4], 
+               title = "Pairwise Correlations and Scatterplots")
+
+# 6. Correlation matrix
+cor_matrix <- marketing %>%
+  cor() %>%
+  round(2)
+
+# ---- Save Step 2 Outputs ----
+ggsave("plots/step2_boxplot_variables.png", plot = p2a, width = 8, height = 5)
+ggsave("plots/step2_pairplot_correlations.png", plot = p2b, width = 8, height = 6)
+write_csv(as.data.frame(cor_matrix), "tables/step2_correlation_matrix.csv")
+write_csv(zero_counts, "tables/step2_zero_counts.csv")
+
+```
+
+```{r}
+
+# ---- STEP 3A: Log-Transform Newspaper Spend ----
+
+marketing <- marketing %>%
+  mutate(log_newspaper = log(newspaper + 1))  # Avoids log(0)
+
+# Histogram of original 'newspaper' (p3a)
+p3a <- ggplot(marketing, aes(x = newspaper)) +
+  geom_histogram(bins = 30, fill = "darkblue") +
+  labs(title = "Original Newspaper Spend") +
+  theme_minimal()
+
+# Histogram of log-transformed 'newspaper' (p3b)
+p3b <- ggplot(marketing, aes(x = log_newspaper)) +
+  geom_histogram(bins = 30, fill = "darkgreen") +
+  labs(title = "Log-Transformed Newspaper Spend") +
+  theme_minimal()
+
+
+# ---- STEP 3B: Scale Predictors & Add Interaction ----
+
+# Standardize predictors
+scaled <- marketing %>%
+  select(youtube, facebook, log_newspaper) %>%
+  scale() %>%
+  as_tibble()
+
+# Add target and interaction term
+marketing_scaled <- bind_cols(scaled, sales = marketing$sales) %>%
+  mutate(youtube_facebook_interaction = youtube * facebook)
+
+# Preview dataset
+glimpse(marketing_scaled)
+
+
+# ---- STEP 3C: Create Train/Test Split ----
+
+set.seed(123)  # Reproducible
+split <- initial_split(marketing_scaled, prop = 0.8)
+train_data <- training(split)
+test_data  <- testing(split)
+
+
+# ---- Save Step 3 Outputs ----
+ggsave("plots/step3_newspaper_original.png", plot = p3a, width = 8, height = 5)
+ggsave("plots/step3_newspaper_log_transformed.png", plot = p3b, width = 8, height = 5)
+write.csv(head(marketing_scaled, 10), "tables/step3_scaled_data_preview.csv", row.names = FALSE)
+
+
+```
+
+```{r}
+
+# ---- STEP 4: EDA Plots – Predictors vs. Sales ----
+
+# YouTube vs. Sales
+p4a <- ggplot(train_data, aes(x = youtube, y = sales)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = TRUE, color = "blue") +
+  labs(title = "YouTube Spend vs Sales",
+       x = "YouTube (standardized)", y = "Sales") +
+  theme_minimal()
+
+# Facebook vs. Sales
+p4b <- ggplot(train_data, aes(x = facebook, y = sales)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = TRUE, color = "darkgreen") +
+  labs(title = "Facebook Spend vs Sales",
+       x = "Facebook (standardized)", y = "Sales") +
+  theme_minimal()
+
+# Log(Newspaper) vs. Sales
+p4c <- ggplot(train_data, aes(x = log_newspaper, y = sales)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = TRUE, color = "purple") +
+  labs(title = "Log Newspaper Spend vs Sales",
+       x = "Log(Newspaper + 1)", y = "Sales") +
+  theme_minimal()
+
+# Interaction term vs. Sales
+p4d <- ggplot(train_data, aes(x = youtube_facebook_interaction, y = sales)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "loess", se = TRUE, color = "orange") +
+  labs(title = "YouTube x Facebook Interaction vs Sales",
+       x = "Interaction (YouTube * Facebook)", y = "Sales") +
+  theme_minimal()
+
+
+# ---- Save Step 4 Outputs ----
+ggsave("plots/step4_youtube_vs_sales.png", plot = p4a, width = 8, height = 5)
+ggsave("plots/step4_facebook_vs_sales.png", plot = p4b, width = 8, height = 5)
+ggsave("plots/step4_lognewspaper_vs_sales.png", plot = p4c, width = 8, height = 5)
+ggsave("plots/step4_interaction_vs_sales.png", plot = p4d, width = 8, height = 5)
+
+write.csv(head(train_data, 10), "tables/step4_transformed_data_head.csv", row.names = FALSE)
+
+```
+
+```{r}
+
+# ---- STEP 5A: OLS Regression ----
+
+model_ols <- lm(sales ~ youtube + facebook + log_newspaper + youtube_facebook_interaction, data = train_data)
+
+# GT-style table for OLS coefficients
+ols_table <- broom::tidy(model_ols) %>%
+  mutate(across(where(is.numeric), round, 3))
+
+# Residual diagnostics plot
+p5c <- performance::check_model(model_ols)  # this renders to viewer, save via export below
+
+# VIF check
+car::vif(model_ols)
+
+
+
+# ---- STEP 5B: Test Set Performance (OLS) ----
+
+pred_ols <- predict(model_ols, newdata = test_data)
+
+rss <- sum((test_data$sales - pred_ols)^2)
+tss <- sum((test_data$sales - mean(test_data$sales))^2)
+rsq <- 1 - rss/tss
+rmse <- sqrt(mean((test_data$sales - pred_ols)^2))
+
+
+
+# ---- STEP 5C: LASSO Regression with CV ----
+
+x_train <- model.matrix(sales ~ youtube + facebook + log_newspaper + youtube_facebook_interaction, data = train_data)[, -1]
+y_train <- train_data$sales
+
+lasso_cv <- cv.glmnet(x_train, y_train, alpha = 1)
+
+# Plot cross-validation error
+p5b <- plot(lasso_cv)
+
+# Best lambda
+best_lambda <- lasso_cv$lambda.min
+
+# Final LASSO model
+model_lasso <- glmnet(x_train, y_train, alpha = 1, lambda = best_lambda)
+
+# Coefficient table from LASSO
+coef_df <- as.data.frame(as.matrix(coef(model_lasso)))
+names(coef_df) <- "Coefficient"
+coef_df$Variable <- rownames(coef_df)
+rownames(coef_df) <- NULL
+coef_df <- coef_df %>% filter(Variable != "(Intercept)")
+
+
+# ---- STEP 5D: LASSO Performance on Test Set ----
+
+x_test <- model.matrix(sales ~ youtube + facebook + log_newspaper + youtube_facebook_interaction, data = test_data)[, -1]
+pred_lasso <- predict(model_lasso, s = best_lambda, newx = x_test)
+
+rss_lasso <- sum((test_data$sales - pred_lasso)^2)
+rsq_lasso <- 1 - rss_lasso/tss
+rmse_lasso <- sqrt(mean((test_data$sales - pred_lasso)^2))
+
+
+
+# ---- STEP 5E: Compare Models (Table + Visual) ----
+
+model_perf <- tibble(
+  Model = c("OLS", "LASSO"),
+  R_squared = c(rsq, rsq_lasso),
+  RMSE = c(rmse, rmse_lasso)
+)
+
+# Visualize LASSO Coefficients
+p5a <- coef_df %>%
+  ggplot(aes(x = reorder(Variable, Coefficient), y = Coefficient)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(title = "LASSO Coefficients", x = "", y = "Value") +
+  theme_minimal()
+
+
+# ---- STEP 5: Save All Outputs ----
+
+# ✅ Save LASSO Coefficient Bar Chart (ggplot)
+ggsave("plots/step5_lasso_coefficients.png", plot = p5a, width = 7, height = 4)
+
+# ✅ Save LASSO CV Error Plot (base R plot via png)
+tryCatch({
+  png("plots/step5_lasso_cv_error.png", width = 700, height = 400)
+  plot(lasso_cv)
+  dev.off()
+}, error = function(e) {
+  message("❌ Error while saving LASSO CV plot: ", e$message)
+})
+
+# ✅ Save OLS Diagnostics Plot (already displayed via performance::check_model)
+# ⚠️ NOTE: This must be manually exported from the Viewer if needed as it's interactive
+# If needed programmatically, reassign it using grid capture, but manual is easiest
+# Otherwise, skip or leave as a reminder:
+# ggsave("plots/step5_ols_diagnostics.png", width = 7, height = 5)  # Viewer export only
+
+# ✅ Save Data Tables
+write.csv(coef_df, "tables/step5_lasso_coefficients.csv", row.names = FALSE)
+write.csv(ols_table, "tables/step5_ols_coefficients.csv", row.names = FALSE)
+write.csv(model_perf, "tables/step5_model_comparison.csv", row.names = FALSE)
+
+
+
+
+
+```
+
+```{r}
+
+# ---- STEP 6A: Tidy OLS Coefficients ----
+
+ols_summary <- broom::tidy(model_ols) %>%
+  filter(term != "(Intercept)") %>%
+  rename(Variable = term, OLS = estimate)
+
+
+# ---- STEP 6B: Tidy LASSO Coefficients ----
+
+lasso_coeffs <- coef_df %>%
+  rename(LASSO = Coefficient)
+
+
+# ---- STEP 6C: Join & Prepare for Plotting ----
+
+combined_coeffs <- left_join(ols_summary, lasso_coeffs, by = "Variable")
+
+coeff_plot_data <- combined_coeffs %>%
+  pivot_longer(cols = c("OLS", "LASSO"), names_to = "Model", values_to = "Coefficient")
+
+
+# ---- STEP 6D: Plot Coefficients Side-by-Side ----
+
+p6 <- ggplot(coeff_plot_data, aes(x = reorder(Variable, Coefficient), y = Coefficient, fill = Model)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  labs(title = "Comparison of Coefficients: OLS vs LASSO", x = "", y = "Coefficient Value") +
+  theme_minimal()
+
+
+# ---- STEP 6E: Save Outputs ----
+
+# Plot
+ggsave("plots/step6_model_coeff_comparison.png", plot = p6, width = 8, height = 5)
+
+# Tables
+write.csv(ols_summary, "tables/step6_ols_coefficients.csv", row.names = FALSE)
+write.csv(model_perf, "tables/step6_model_performance_comparison.csv", row.names = FALSE)
+write.csv(combined_coeffs, "tables/step6_coefficients_comparison.csv", row.names = FALSE)
+
+
+
+
+```
+
+```{r}
+
+# ---- STEP 7: Reporting Tables – Clean OLS Summary and Performance ----
+
+# 7A. GT Table: OLS Coefficient Summary (cleaned)
+ols_table_clean <- broom::tidy(model_ols) %>%
+  mutate(
+    estimate = round(estimate, 3),
+    std.error = round(std.error, 3),
+    statistic = round(statistic, 2),
+    p.value = signif(p.value, 3)
+  )
+
+gt_ols <- gt(ols_table_clean) %>%
+  tab_header(
+    title = "OLS Regression Results",
+    subtitle = "YouTube, Facebook, and Newspaper Predicting Sales"
+  ) %>%
+  fmt_number(columns = c(estimate, std.error, statistic, p.value), decimals = 3) %>%
+  cols_label(
+    term = "Variable",
+    estimate = "Coefficient",
+    std.error = "Std. Error",
+    statistic = "t value",
+    p.value = "p value"
+  )
+
+# 7B. GT Table: Model Performance (OLS vs LASSO)
+gt_perf <- gt(model_perf) %>%
+  tab_header(
+    title = "Model Comparison: OLS vs LASSO",
+    subtitle = "Test Set Performance Metrics"
+  ) %>%
+  fmt_number(columns = c(R_squared, RMSE), decimals = 3) %>%
+  cols_label(
+    R_squared = "R²",
+    RMSE = "Root Mean Squared Error"
+  )
+
+# 7C. Save OLS Summary Table
+write.csv(ols_table_clean, "tables/step7_ols_coefficients.csv", row.names = FALSE)
+write.csv(model_perf, "tables/step7_model_comparison.csv", row.names = FALSE)
+
+```
+
+```{r}
+
+# ---- STEP 8: Budget Optimization with LASSO Model ----
+
+# 8A. Standardized Spend Grid Simulation
+
+# Create grid of standardized YouTube and Facebook spend values
+spend_grid <- expand.grid(
+  youtube = seq(-2, 2, length.out = 50),
+  facebook = seq(-2, 2, length.out = 50)
+)
+
+# Add interaction + fixed log_newspaper
+spend_grid <- spend_grid %>%
+  mutate(
+    youtube_facebook_interaction = youtube * facebook,
+    log_newspaper = 0  # Hold constant at average
+  )
+
+# Predict using LASSO model
+grid_matrix <- model.matrix(~ youtube + facebook + log_newspaper + youtube_facebook_interaction, data = spend_grid)[, -1]
+spend_grid$predicted_sales <- as.vector(predict(model_lasso, s = best_lambda, newx = grid_matrix))
+
+# Plot: Predicted Sales Heatmap (Standardized)
+p8a <- ggplot(spend_grid, aes(x = youtube, y = facebook, fill = predicted_sales)) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "C", direction = -1) +
+  labs(
+    title = "Simulated Predicted Sales by YouTube and Facebook Spend",
+    subtitle = "Log(Newspaper) held constant at mean",
+    x = "YouTube Spend (Standardized)",
+    y = "Facebook Spend (Standardized)",
+    fill = "Predicted Sales"
+  ) +
+  theme_minimal()
+
+# 8B. Convert to Dollar-Level Spend Grid
+
+# Compute means and SDs
+youtube_mean <- mean(marketing$youtube)
+youtube_sd   <- sd(marketing$youtube)
+facebook_mean <- mean(marketing$facebook)
+facebook_sd   <- sd(marketing$facebook)
+
+# Convert to dollars
+sim_grid_dollar <- spend_grid %>%
+  mutate(
+    youtube_dollars = youtube * youtube_sd + youtube_mean,
+    facebook_dollars = facebook * facebook_sd + facebook_mean
+  )
+
+# Plot: Dollar-Level Heatmap
+p8b <- ggplot(sim_grid_dollar, aes(x = youtube_dollars, y = facebook_dollars, fill = predicted_sales)) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma") +
+  labs(
+    title = "Predicted Sales by YouTube and Facebook Budget",
+    subtitle = "Simulated using LASSO model, log(newspaper) held constant",
+    x = "YouTube Spend ($)",
+    y = "Facebook Spend ($)",
+    fill = "Predicted Sales"
+  ) +
+  theme_minimal()
+
+# 8C. Budget Optimization at Fixed Total Spend
+
+# Define budget
+total_budget <- 300  # Modify this as needed
+
+# Generate all combinations summing to budget
+budget_allocations <- expand.grid(
+  youtube_dollars = seq(0, total_budget, by = 1),
+  facebook_dollars = seq(0, total_budget, by = 1)
+) %>%
+  filter(youtube_dollars + facebook_dollars == total_budget)
+
+# Standardize and predict
+budget_allocations <- budget_allocations %>%
+  mutate(
+    youtube = (youtube_dollars - youtube_mean) / youtube_sd,
+    facebook = (facebook_dollars - facebook_mean) / facebook_sd,
+    youtube_facebook_interaction = youtube * facebook,
+    log_newspaper = 0
+  )
+
+budget_matrix <- model.matrix(~ youtube + facebook + log_newspaper + youtube_facebook_interaction, data = budget_allocations)[, -1]
+budget_allocations$predicted_sales <- as.vector(predict(model_lasso, s = best_lambda, newx = budget_matrix))
+
+# Find best combo
+best_combo <- budget_allocations %>%
+  arrange(desc(predicted_sales)) %>%
+  slice(1)
+
+# Plot: Sales vs YouTube for fixed budget
+p8c <- ggplot(budget_allocations, aes(x = youtube_dollars, y = predicted_sales)) +
+  geom_line(color = "steelblue", size = 1.2) +
+  labs(
+    title = paste("Optimal YouTube Allocation for $", total_budget, " Total Budget", sep = ""),
+    x = "YouTube Spend ($)",
+    y = "Predicted Sales"
+  ) +
+  theme_minimal()
+
+# 8D. Save all Step 8 outputs
+ggsave("plots/step8_simulated_standardized_heatmap.png", plot = p8a, width = 8, height = 5)
+ggsave("plots/step8_simulated_dollar_heatmap.png", plot = p8b, width = 8, height = 5)
+ggsave("plots/step8_optimal_budget_curve.png", plot = p8c, width = 8, height = 5)
+write.csv(best_combo, "tables/step8_optimal_allocation.csv", row.names = FALSE)
+
+```
+
+```{r}
+
+# ---- STEP 9: Final Model Comparison and Heatmap ----
+
+# 9A. GT Table – Model Performance
+
+gt_perf_table <- model_perf %>%
+  mutate(
+    R_squared = round(R_squared, 3),
+    RMSE = round(RMSE, 3)
+  ) %>%
+  gt() %>%
+  tab_header(
+    title = "Model Comparison: OLS vs LASSO",
+    subtitle = "Test Set Performance Metrics"
+  ) %>%
+  cols_label(
+    Model = "Model",
+    R_squared = "R²",
+    RMSE = "Root Mean Squared Error"
+  ) %>%
+  fmt_number(columns = c(R_squared, RMSE), decimals = 3) %>%
+  tab_options(table.align = "center")
+
+# 9B. Reactable Table – Coefficient Comparison
+
+
+react_coeff_table <- reactable(
+  combined_coeffs,
+  columns = list(
+    Variable = colDef(name = "Variable", align = "left"),
+    OLS = colDef(name = "OLS Estimate", format = colFormat(digits = 3)),
+    LASSO = colDef(name = "LASSO Estimate", format = colFormat(digits = 3))
+  ),
+  bordered = TRUE,
+  striped = TRUE,
+  highlight = TRUE,
+  searchable = TRUE,
+  defaultPageSize = 10
+)
+
+# 9C. Plot – OLS vs LASSO Coefficients (Final Export)
+p9_coeff_compare <- ggplot(coeff_plot_data, aes(x = reorder(Variable, Coefficient), y = Coefficient, fill = Model)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  labs(
+    title = "Final Comparison: OLS vs LASSO Coefficients",
+    x = "Variable",
+    y = "Coefficient Value"
+  ) +
+  theme_minimal()
+
+# 9D. Plot – Heatmap of Predicted Sales from OLS
+
+# Rebuild prediction grid for OLS
+grid_df <- expand.grid(
+  youtube = seq(from = -2, to = 2, length.out = 100),
+  facebook = seq(from = -2, to = 2, length.out = 100)
+) %>%
+  mutate(
+    log_newspaper = 0,
+    youtube_facebook_interaction = youtube * facebook
+  )
+
+# Predict with OLS model
+grid_df$predicted_sales <- predict(model_ols, newdata = grid_df)
+
+# Plot
+p9b <- ggplot(grid_df, aes(x = youtube, y = facebook, fill = predicted_sales)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "white", high = "darkgreen") +
+  labs(
+    title = "Predicted Sales Heatmap (OLS Model)",
+    x = "YouTube (Standardized)",
+    y = "Facebook (Standardized)",
+    fill = "Predicted Sales"
+  ) +
+  theme_minimal()
+
+# 9E. Save all Step 9 outputs
+
+# Final plot: Predicted sales heatmap from OLS
+ggsave("plots/step9_predicted_sales_ols_heatmap.png", plot = p9b, width = 8, height = 5)
+
+# Final tables
+write.csv(combined_coeffs, "tables/step9_coefficients_ols_vs_lasso.csv", row.names = FALSE)
+write.csv(model_perf, "tables/step9_model_performance.csv", row.names = FALSE)
+
+
+```
+
+```{r}
+
+
+
+```
+
+```{r}
+
+
+
+
+
+
+```
+
+```{r}
+
+
+
+
+
+```
+
+```{r}
+
+
+
+
+
+
+```
+
+```{r}
+
+
+
+
+
+```
+
+```{r}
+
+
+
+
+
+
+```
